@@ -1,0 +1,17 @@
+{
+  "mqtt_host": "fruitsalad",
+  "mqtt_port": 1883,
+  "mqtt_topic": "home/ambient-audio",
+  "client_id": "frostbyte-defrost-listener",
+  "audio_dir": "/home/pi/frostbyte/audio",
+  "allowed_exts": [".wav", ".mp3"],
+  "alsa_device": "defrost",
+  "volume_control": "PCM",
+  "default_volume": 80,
+  "default_gain_db": 0,
+  "max_gain_db": 12,
+  "clip_gains_db": {
+    "quiet-alert.mp3": 6
+  },
+  "log_level": "INFO"
+}
