@@ -83,7 +83,8 @@ sudo journalctl -u defrost.service -f
 `audio_manager.py` is a small dependency-free web server for adding and
 removing clips. It can only create or delete direct `.mp3` and `.wav` files in
 the directory where it is started; it does not follow symlinks or allow paths.
-Existing files are never overwritten. It listens on all network interfaces by
+Existing files are never overwritten, and the **Preview** button plays a file
+in the browser directly from that directory. It listens on all network interfaces by
 default so that phones and other devices on the local network can use it. It
 intentionally has no login, so anyone who can reach the chosen port can upload
 or delete audio files:

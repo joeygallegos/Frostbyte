@@ -47,6 +47,12 @@ class AudioManagerTests(unittest.TestCase):
         self.assertEqual(self.request("DELETE", "/api/files/notice.mp3")[0], 204)
         self.assertFalse((self.directory / "notice.mp3").exists())
 
+    def test_allowed_audio_can_be_previewed_but_paths_cannot_be_read(self):
+        (self.directory / "preview.wav").write_bytes(b"wave-data")
+        status, payload = self.request("GET", "/api/files/preview.wav")
+        self.assertEqual((status, payload), (200, "wave-data"))
+        self.assertEqual(self.request("GET", "/api/files/%2E%2E%2Fconfig.json")[0], 404)
+
     def test_path_traversal_and_existing_files_are_rejected(self):
         self.assertEqual(self.upload("../outside.wav")[0], 400)
         self.assertEqual(self.request("DELETE", "/api/files/%2E%2E%2Foutside.wav")[0], 400)

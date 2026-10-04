@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from email.parser import BytesParser
@@ -33,7 +34,7 @@ form{display:flex;gap:.75rem;align-items:center;margin:2rem 0}button{padding:.45
 <section id="files-panel" role="tabpanel"><form id="upload"><input name="audio" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" required><button>Upload</button></form><p id="message" role="status"></p><ul id="files"></ul></section>
 <section id="activity-panel" class="hidden" role="tabpanel"><p><button type="button" id="refresh-activity">Refresh activity</button></p><p id="activity-message" role="status"></p><ul id="activity"></ul></section><script>
 const message=document.querySelector('#message'),files=document.querySelector('#files'),activity=document.querySelector('#activity'),activityMessage=document.querySelector('#activity-message');
-async function refresh(){const r=await fetch('/api/files');const names=await r.json();files.replaceChildren(...names.map(name=>{const li=document.createElement('li'),label=document.createElement('span'),button=document.createElement('button');label.textContent=name;button.textContent='Delete';button.onclick=async()=>{if(!confirm(`Delete ${name}?`))return;const r=await fetch('/api/files/'+encodeURIComponent(name),{method:'DELETE'});message.textContent=r.ok?'Deleted.':await r.text();if(r.ok)refresh()};li.append(label,button);return li}))}
+async function refresh(){const r=await fetch('/api/files');const names=await r.json();files.replaceChildren(...names.map(name=>{const li=document.createElement('li'),label=document.createElement('span'),preview=document.createElement('button'),button=document.createElement('button');label.textContent=name;preview.type='button';preview.textContent='Preview';preview.onclick=()=>{const player=document.createElement('audio');player.controls=true;player.preload='none';player.src='/api/files/'+encodeURIComponent(name);li.replaceChildren(label,preview,button,player);player.play().catch(()=>{})};button.textContent='Delete';button.onclick=async()=>{if(!confirm(`Delete ${name}?`))return;const r=await fetch('/api/files/'+encodeURIComponent(name),{method:'DELETE'});message.textContent=r.ok?'Deleted.':await r.text();if(r.ok)refresh()};li.append(label,preview,button);return li}))}
 async function refreshActivity(){activityMessage.textContent='Loading recent activity…';try{const r=await fetch('/api/activity');if(!r.ok)throw new Error('Request failed');const events=await r.json();activityMessage.textContent=events.length?'':'No recent playback activity.';activity.replaceChildren(...events.map(event=>{const li=document.createElement('li'),text=document.createElement('span'),time=document.createElement('time'),date=new Date(event.time);li.className='event';text.textContent=`${event.event}: ${event.clip}`;time.dateTime=event.time;time.textContent=Number.isNaN(date.valueOf())?event.time:date.toLocaleString();li.append(text,time);return li}))}catch(error){activity.replaceChildren();activityMessage.textContent='Could not load playback activity. Try refreshing.'}}
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{const activityTab=button.dataset.tab==='activity';document.querySelector('#files-panel').classList.toggle('hidden',activityTab);document.querySelector('#activity-panel').classList.toggle('hidden',!activityTab);document.querySelectorAll('[data-tab]').forEach(tab=>tab.setAttribute('aria-selected',tab===button));if(activityTab)refreshActivity()});document.querySelector('#refresh-activity').onclick=refreshActivity;
 document.querySelector('#upload').onsubmit=async event=>{event.preventDefault();const r=await fetch('/api/files',{method:'POST',body:new FormData(event.currentTarget)});message.textContent=r.ok?'Uploaded.':await r.text();if(r.ok){event.currentTarget.reset();refresh()}};refresh();
@@ -104,7 +105,29 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
             self.send_text(HTTPStatus.OK, json.dumps(audio_files(self.audio_directory)), "application/json")
         elif path == "/api/activity":
             self.send_text(HTTPStatus.OK, json.dumps(activity_events(self.audio_directory)), "application/json")
+        elif path.startswith("/api/files/"):
+            self.serve_audio(unquote(path[len("/api/files/"):]))
         else:
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+    def serve_audio(self, name: str) -> None:
+        """Serve one validated direct-child audio file for the browser preview control."""
+        if not valid_audio_name(name):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        target = self.audio_directory / name
+        try:
+            if target.is_symlink() or not target.is_file():
+                raise FileNotFoundError
+            content_type = "audio/mpeg" if target.suffix.lower() == ".mp3" else "audio/wav"
+            size = target.stat().st_size
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            with target.open("rb") as audio_file:
+                shutil.copyfileobj(audio_file, self.wfile)
+        except (FileNotFoundError, OSError):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
