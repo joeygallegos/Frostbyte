@@ -175,7 +175,7 @@ After=network.target
 
 [Service]
 Type=simple
-User={systemd_quote(user)}
+User={user}
 WorkingDirectory={systemd_path(working_directory)}
 ExecStart={systemd_quote(python)} {systemd_quote(str(script))} --host {systemd_quote(host)} --port {port}
 Restart=always

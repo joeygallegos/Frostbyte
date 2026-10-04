@@ -69,7 +69,7 @@ class AudioManagerTests(unittest.TestCase):
         directory = PurePosixPath("/srv/audio")
         unit = audio_manager.service_unit(PurePosixPath("/srv/app/audio_manager.py"), directory, "player", "/usr/bin/python3", "127.0.0.1", 8000)
         self.assertIn(f"WorkingDirectory={audio_manager.systemd_path(directory)}", unit)
-        self.assertIn('User="player"', unit)
+        self.assertIn("User=player", unit)
         self.assertIn("--host \"127.0.0.1\" --port 8000", unit)
 
     def test_default_bind_address_is_all_interfaces(self):
