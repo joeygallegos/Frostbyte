@@ -5,7 +5,9 @@ import math
 import os
 import queue
 import subprocess
+import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +29,9 @@ CLIENT_ID = CONFIG.get("client_id", "frostbyte-defrost-listener")
 
 AUDIO_DIR = Path(CONFIG.get("audio_dir", str(Path(__file__).resolve().parent)))
 ALLOWED_EXTS = set(CONFIG.get("allowed_exts", [".wav", ".mp3"]))
+ACTIVITY_LOG_PATH = Path(CONFIG.get("activity_log_path", str(Path(__file__).resolve().parent / "playback_activity.jsonl")))
+ACTIVITY_LOG_LIMIT = 200
+ACTIVITY_LOG_MAX_READ_BYTES = 256 * 1024
 
 ALSA_DEVICE = CONFIG.get("alsa_device", "default")
 VOLUME_CONTROL = CONFIG.get("volume_control", "PCM")
@@ -45,6 +50,7 @@ logging.basicConfig(
 )
 
 play_queue: "queue.Queue[dict]" = queue.Queue()
+activity_log_lock = threading.Lock()
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -94,6 +100,48 @@ def resolve_clip_path(clip_name: str) -> Optional[Path]:
         return None
 
     return clip_path
+
+
+def record_activity(event: str, clip: str) -> None:
+    """Persist a bounded, payload-free activity trail for the browser manager."""
+    entry = {
+        "time": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "clip": clip,
+    }
+    try:
+        with activity_log_lock:
+            try:
+                with ACTIVITY_LOG_PATH.open("rb") as activity_log:
+                    activity_log.seek(max(0, ACTIVITY_LOG_PATH.stat().st_size - ACTIVITY_LOG_MAX_READ_BYTES))
+                    previous = activity_log.read().decode("utf-8", errors="replace").splitlines()
+            except FileNotFoundError:
+                previous = []
+
+            # Keep only valid, complete records from the old file. This also
+            # repairs a partially written file left by an unexpected shutdown.
+            lines = []
+            for line in previous:
+                try:
+                    existing = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if all(isinstance(existing.get(key), str) for key in ("time", "event", "clip")):
+                    lines.append(json.dumps(existing, separators=(",", ":")))
+            lines = lines[-(ACTIVITY_LOG_LIMIT - 1):]
+            lines.append(json.dumps(entry, separators=(",", ":")))
+
+            # Replace the file atomically so the web server reads either the
+            # complete previous log or complete new log, never a truncated one.
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=ACTIVITY_LOG_PATH.parent, delete=False) as temporary:
+                temporary.write("\n".join(lines) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, ACTIVITY_LOG_PATH)
+    except OSError as exc:
+        # Recording must never interrupt sound playback if storage is unavailable.
+        logging.warning("Could not update playback activity log: %s", exc)
 
 
 def play_clip_with_gain(path: Path, gain_db: float) -> bool:
@@ -226,7 +274,9 @@ def playback_worker():
         set_volume(volume)
 
         gain_db = get_gain_db(clip_path, meta)
+        record_activity("playing", clip_path.name)
         play_clip(clip_path, gain_db)
+        record_activity("playback attempt ended", clip_path.name)
         play_queue.task_done()
 
 
@@ -244,12 +294,15 @@ def handle_message(payload_raw: bytes):
 
     if not clip_name:
         logging.warning("No 'clip' in message - ignoring.")
+        record_activity("ignored trigger", "(no clip)")
         return
 
     clip_path = resolve_clip_path(clip_name)
     if not clip_path:
+        record_activity("ignored trigger", sanitize_clip_name(str(clip_name)))
         return
 
+    record_activity("triggered", clip_path.name)
     play_queue.put({"path": clip_path, "meta": meta})
 
 

@@ -100,7 +100,7 @@ python3 audio_manager.py --host 127.0.0.1
 ```
 
 On a Linux system with systemd, install it as an always-on service from the
-audio directory:
+Frostbyte project directory (the directory containing `defrost_listener.py`):
 
 ```bash
 python3 audio_manager.py --install
@@ -113,6 +113,20 @@ restarts after failures and reboot. Manage it with:
 ```bash
 sudo systemctl status frostbyte-audio-manager.service
 sudo systemctl restart frostbyte-audio-manager.service
+```
+
+The **Activity** tab shows the latest 200 accepted, ignored, started, and ended
+playback attempts. The listener stores this shared activity log as
+`playback_activity.jsonl` next to `defrost_listener.py` by default. Set
+`activity_log_path` in `config.json` if the audio manager runs from a different
+directory; set it to that directory's `playback_activity.jsonl` file so both
+services use the same location. The log must be writable by the listener.
+In the standard installation, run both services as the same user from the
+project directory so they share the default log file and its permissions.
+After updating this version, restart the listener so it begins writing activity:
+
+```bash
+sudo systemctl restart defrost.service
 ```
 
 ## Send playback requests

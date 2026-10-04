@@ -4,6 +4,7 @@
   "mqtt_topic": "home/ambient-audio",
   "client_id": "frostbyte-defrost-listener",
   "audio_dir": "/home/pi/frostbyte/audio",
+  "activity_log_path": "/home/pi/frostbyte/playback_activity.jsonl",
   "allowed_exts": [".wav", ".mp3"],
   "alsa_device": "defrost",
   "volume_control": "PCM",

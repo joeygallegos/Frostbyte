@@ -1,4 +1,5 @@
 import http.client
+import json
 import os
 import tempfile
 import threading
@@ -64,6 +65,17 @@ class AudioManagerTests(unittest.TestCase):
         self.assertNotIn("linked.mp3", self.request("GET", "/api/files")[1])
         self.assertEqual(self.request("DELETE", "/api/files/linked.mp3")[0], 404)
         self.assertTrue(link.is_symlink())
+
+    def test_activity_endpoint_returns_newest_valid_events_first(self):
+        (self.directory / audio_manager.ACTIVITY_LOG_NAME).write_text(
+            '{"time":"2026-01-01T00:00:00+00:00","event":"triggered","clip":"first.wav"}\n'
+            'not-json\n'
+            '{"time":"2026-01-01T00:01:00+00:00","event":"finished","clip":"second.mp3"}\n',
+            encoding="utf-8",
+        )
+        status, payload = self.request("GET", "/api/activity")
+        self.assertEqual(status, 200)
+        self.assertEqual([event["clip"] for event in json.loads(payload)], ["second.mp3", "first.wav"])
 
     def test_unit_keeps_the_requested_current_directory_and_bind(self):
         directory = PurePosixPath("/srv/audio")

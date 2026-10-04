@@ -18,18 +18,24 @@ from urllib.parse import unquote, urlparse
 ALLOWED_EXTENSIONS = {".mp3", ".wav"}
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 SERVICE_NAME = "frostbyte-audio-manager.service"
+ACTIVITY_LOG_NAME = "playback_activity.jsonl"
+ACTIVITY_LIMIT = 200
+MAX_ACTIVITY_LOG_READ_BYTES = 1024 * 1024
 
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Frostbyte Audio Manager</title><style>
 body{font:16px system-ui,sans-serif;max-width:720px;margin:3rem auto;padding:0 1rem;color:#1f2937}h1{margin-bottom:.25rem}
-form{display:flex;gap:.75rem;align-items:center;margin:2rem 0}button{padding:.45rem .75rem;cursor:pointer}li{display:flex;gap:1rem;align-items:center;padding:.55rem 0;border-bottom:1px solid #ddd}li span{flex:1}#message{min-height:1.5em;color:#9b1c1c}
+form{display:flex;gap:.75rem;align-items:center;margin:2rem 0}button{padding:.45rem .75rem;cursor:pointer}li{display:flex;gap:1rem;align-items:center;padding:.55rem 0;border-bottom:1px solid #ddd}li span{flex:1}#message{min-height:1.5em;color:#9b1c1c}.tabs{display:flex;gap:.5rem;margin:2rem 0 0}.tabs button[aria-selected="true"]{font-weight:700}.hidden{display:none}.event{display:block}.event time{display:block;color:#6b7280;font-size:.85em}
 </style></head><body><h1>Frostbyte Audio Manager</h1><p>Upload or remove MP3 and WAV files in this directory.</p>
-<form id="upload"><input name="audio" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" required><button>Upload</button></form>
-<p id="message" role="status"></p><ul id="files"></ul><script>
-const message=document.querySelector('#message'),files=document.querySelector('#files');
+<nav class="tabs" aria-label="Audio manager sections"><button type="button" data-tab="files" aria-controls="files-panel" aria-selected="true">Files</button><button type="button" data-tab="activity" aria-controls="activity-panel" aria-selected="false">Playback activity</button></nav>
+<section id="files-panel" role="tabpanel"><form id="upload"><input name="audio" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" required><button>Upload</button></form><p id="message" role="status"></p><ul id="files"></ul></section>
+<section id="activity-panel" class="hidden" role="tabpanel"><p><button type="button" id="refresh-activity">Refresh activity</button></p><p id="activity-message" role="status"></p><ul id="activity"></ul></section><script>
+const message=document.querySelector('#message'),files=document.querySelector('#files'),activity=document.querySelector('#activity'),activityMessage=document.querySelector('#activity-message');
 async function refresh(){const r=await fetch('/api/files');const names=await r.json();files.replaceChildren(...names.map(name=>{const li=document.createElement('li'),label=document.createElement('span'),button=document.createElement('button');label.textContent=name;button.textContent='Delete';button.onclick=async()=>{if(!confirm(`Delete ${name}?`))return;const r=await fetch('/api/files/'+encodeURIComponent(name),{method:'DELETE'});message.textContent=r.ok?'Deleted.':await r.text();if(r.ok)refresh()};li.append(label,button);return li}))}
+async function refreshActivity(){activityMessage.textContent='Loading recent activity…';try{const r=await fetch('/api/activity');if(!r.ok)throw new Error('Request failed');const events=await r.json();activityMessage.textContent=events.length?'':'No recent playback activity.';activity.replaceChildren(...events.map(event=>{const li=document.createElement('li'),text=document.createElement('span'),time=document.createElement('time'),date=new Date(event.time);li.className='event';text.textContent=`${event.event}: ${event.clip}`;time.dateTime=event.time;time.textContent=Number.isNaN(date.valueOf())?event.time:date.toLocaleString();li.append(text,time);return li}))}catch(error){activity.replaceChildren();activityMessage.textContent='Could not load playback activity. Try refreshing.'}}
+document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{const activityTab=button.dataset.tab==='activity';document.querySelector('#files-panel').classList.toggle('hidden',activityTab);document.querySelector('#activity-panel').classList.toggle('hidden',!activityTab);document.querySelectorAll('[data-tab]').forEach(tab=>tab.setAttribute('aria-selected',tab===button));if(activityTab)refreshActivity()});document.querySelector('#refresh-activity').onclick=refreshActivity;
 document.querySelector('#upload').onsubmit=async event=>{event.preventDefault();const r=await fetch('/api/files',{method:'POST',body:new FormData(event.currentTarget)});message.textContent=r.ok?'Uploaded.':await r.text();if(r.ok){event.currentTarget.reset();refresh()}};refresh();
 </script></body></html>"""
 
@@ -48,6 +54,29 @@ def audio_files(directory: Path) -> list[str]:
         for entry in directory.iterdir()
         if entry.is_file() and not entry.is_symlink() and valid_audio_name(entry.name)
     )
+
+
+def activity_events(directory: Path) -> list[dict[str, str]]:
+    """Read recent listener events without exposing a symlinked or oversized log."""
+    path = directory / ACTIVITY_LOG_NAME
+    try:
+        if path.is_symlink() or not path.is_file():
+            return []
+        with path.open("rb") as activity_log:
+            activity_log.seek(max(0, path.stat().st_size - MAX_ACTIVITY_LOG_READ_BYTES))
+            lines = activity_log.read().splitlines()
+    except OSError:
+        return []
+
+    events = []
+    for line in lines[-ACTIVITY_LIMIT:]:
+        try:
+            event = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if all(isinstance(event.get(key), str) for key in ("time", "event", "clip")):
+            events.append({key: event[key] for key in ("time", "event", "clip")})
+    return list(reversed(events))
 
 
 class AudioManagerHandler(BaseHTTPRequestHandler):
@@ -73,6 +102,8 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
             self.send_text(HTTPStatus.OK, PAGE, "text/html; charset=utf-8")
         elif path == "/api/files":
             self.send_text(HTTPStatus.OK, json.dumps(audio_files(self.audio_directory)), "application/json")
+        elif path == "/api/activity":
+            self.send_text(HTTPStatus.OK, json.dumps(activity_events(self.audio_directory)), "application/json")
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
