@@ -78,6 +78,43 @@ sudo systemctl status defrost.service
 sudo journalctl -u defrost.service -f
 ```
 
+## Manage audio files in a browser
+
+`audio_manager.py` is a small dependency-free web server for adding and
+removing clips. It can only create or delete direct `.mp3` and `.wav` files in
+the directory where it is started; it does not follow symlinks or allow paths.
+Existing files are never overwritten. It listens on all network interfaces by
+default so that phones and other devices on the local network can use it. It
+intentionally has no login, so anyone who can reach the chosen port can upload
+or delete audio files:
+
+```bash
+python3 audio_manager.py
+```
+
+Open `http://<server-LAN-IP>:8000/` from another device. To restrict access to
+the server machine only, choose an explicit loopback address:
+
+```bash
+python3 audio_manager.py --host 127.0.0.1
+```
+
+On a Linux system with systemd, install it as an always-on service from the
+audio directory:
+
+```bash
+python3 audio_manager.py --install
+```
+
+The installer prompts for `sudo` only to place, enable, and start
+`frostbyte-audio-manager.service`; the service runs as the invoking user and
+restarts after failures and reboot. Manage it with:
+
+```bash
+sudo systemctl status frostbyte-audio-manager.service
+sudo systemctl restart frostbyte-audio-manager.service
+```
+
 ## Send playback requests
 
 Publish a JSON message containing at least a `clip`:
