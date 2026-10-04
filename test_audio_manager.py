@@ -3,7 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 import audio_manager
@@ -66,8 +66,9 @@ class AudioManagerTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
 
     def test_unit_keeps_the_requested_current_directory_and_bind(self):
-        unit = audio_manager.service_unit(Path("/srv/app/audio_manager.py"), Path("/srv/audio"), "player", "/usr/bin/python3", "127.0.0.1", 8000)
-        self.assertIn(f"WorkingDirectory={audio_manager.systemd_quote(str(Path('/srv/audio')))}", unit)
+        directory = PurePosixPath("/srv/audio")
+        unit = audio_manager.service_unit(PurePosixPath("/srv/app/audio_manager.py"), directory, "player", "/usr/bin/python3", "127.0.0.1", 8000)
+        self.assertIn(f"WorkingDirectory={audio_manager.systemd_path(directory)}", unit)
         self.assertIn('User="player"', unit)
         self.assertIn("--host \"127.0.0.1\" --port 8000", unit)
 

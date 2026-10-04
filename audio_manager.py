@@ -155,6 +155,18 @@ def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def systemd_path(path: Path) -> str:
+    """Format an absolute path for a systemd path setting, not a command argument."""
+    value = str(path)
+    # Check systemd's POSIX syntax instead of Path.is_absolute(), because this
+    # generator is tested on Windows but only installed on Linux.
+    if not value.startswith("/"):
+        raise ValueError("systemd paths must be absolute")
+    # systemd treats surrounding quotes as literal characters for
+    # WorkingDirectory=. Escape spaces using its documented \x20 syntax instead.
+    return value.replace("\\", "\\\\").replace(" ", "\\x20")
+
+
 def service_unit(script: Path, working_directory: Path, user: str, python: str, host: str, port: int) -> str:
     """Build a unit that restarts the manager after failures or reboot."""
     return f"""[Unit]
@@ -164,7 +176,7 @@ After=network.target
 [Service]
 Type=simple
 User={systemd_quote(user)}
-WorkingDirectory={systemd_quote(str(working_directory))}
+WorkingDirectory={systemd_path(working_directory)}
 ExecStart={systemd_quote(python)} {systemd_quote(str(script))} --host {systemd_quote(host)} --port {port}
 Restart=always
 RestartSec=3
