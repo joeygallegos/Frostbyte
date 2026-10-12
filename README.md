@@ -42,6 +42,8 @@ The main settings are:
 | --- | --- |
 | `mqtt_host`, `mqtt_port`, `mqtt_topic` | MQTT connection and subscribed topic |
 | `audio_dir` | Directory containing playable clips |
+| `activity_log_path` | Shared playback activity log displayed by the browser manager |
+| `payload_history_path` | Bounded JSON cache of the latest received MQTT payloads |
 | `allowed_exts` | Accepted filename extensions |
 | `alsa_device` | ALSA playback device, such as `default` or `defrost` |
 | `volume_control` | Mixer control changed by `amixer`, commonly `PCM` or `Master` |
@@ -80,14 +82,15 @@ sudo journalctl -u defrost.service -f
 
 ## Manage audio files in a browser
 
-`audio_manager.py` is a small dependency-free web server for adding and
+`audio_manager.py` is a small web server for adding and
 removing clips. It can only create or delete direct `.mp3` and `.wav` files in
-the directory where it is started; it does not follow symlinks or allow paths.
+the configured `audio_dir` (or its starting directory when no `config.json`
+exists); it does not follow symlinks or allow paths.
 Existing files are never overwritten, and the **Preview** button plays a file
-in the browser directly from that directory. It listens on all network interfaces by
-default so that phones and other devices on the local network can use it. It
-intentionally has no login, so anyone who can reach the chosen port can upload
-or delete audio files:
+in the browser directly from that directory. It listens on all network
+interfaces by default so that phones and other devices on the local network can
+use it. It intentionally has no login, so anyone who can reach the chosen port
+can upload, delete, or trigger audio files:
 
 ```bash
 python3 audio_manager.py
@@ -116,19 +119,32 @@ sudo systemctl status frostbyte-audio-manager.service
 sudo systemctl restart frostbyte-audio-manager.service
 ```
 
-The **Activity** tab shows the latest 200 accepted, ignored, started, and ended
+The **Playback activity** tab shows the latest 200 accepted, ignored, started, and ended
 playback attempts. The listener stores this shared activity log as
 `playback_activity.jsonl` next to `defrost_listener.py` by default. Set
-`activity_log_path` in `config.json` if the audio manager runs from a different
-directory; set it to that directory's `playback_activity.jsonl` file so both
-services use the same location. The log must be writable by the listener.
-In the standard installation, run both services as the same user from the
-project directory so they share the default log file and its permissions.
+`activity_log_path` in `config.json` to use another location. The log must be
+writable by the listener and readable by the manager.
 After updating this version, restart the listener so it begins writing activity:
 
 ```bash
 sudo systemctl restart defrost.service
 ```
+
+The **Payload history** tab shows the latest 200 MQTT messages received by the
+listener. They are cached atomically in `payload_history.json`, or at the path
+set by `payload_history_path`. Both JSON objects and plain-filename messages are
+preserved. Payloads larger than 16 KiB are shown as truncated and cannot be
+replayed.
+
+Use **Queue** beside a file to publish a standard payload, or edit and submit a
+JSON object in the Payload history tab. **Queue again** republishes a saved
+payload. The manager uses `mqtt_host`, `mqtt_port`, and `mqtt_topic` from
+`config.json`; a successful response means the broker accepted the publish, and
+the listener records the message when it receives it.
+
+Because the site has no login, restrict port 8000 at the network boundary or
+bind it to loopback if other network users must not view payload metadata or
+trigger playback.
 
 ## Send playback requests
 
@@ -160,9 +176,10 @@ mosquitto_pub -h fruitsalad -p 1883 -t home/ambient-audio \
 
 Gain is measured in decibels: `6` dB is roughly twice the signal amplitude and
 `12` dB is roughly four times. Frostbyte sends gained audio through a limiter to
-reduce clipping and clamps requests to `max_gain_db` (12 dB by default). Start at
-3-6 dB and increase carefully; extra gain cannot restore detail missing from a
-poor recording and can still make distortion more noticeable.
+reduce clipping, renders it as 48 kHz PCM to preserve playback speed across
+source formats, and clamps requests to `max_gain_db` (12 dB by default). Start
+at 3-6 dB and increase carefully; extra gain cannot restore detail missing from
+a poor recording and can still make distortion more noticeable.
 
 For a consistently quiet file, add it to `clip_gains_db` in `config.json`:
 

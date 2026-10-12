@@ -5,6 +5,7 @@
   "client_id": "frostbyte-defrost-listener",
   "audio_dir": "/home/pi/frostbyte/audio",
   "activity_log_path": "/home/pi/frostbyte/playback_activity.jsonl",
+  "payload_history_path": "/home/pi/frostbyte/payload_history.json",
   "allowed_exts": [".wav", ".mp3"],
   "alsa_device": "defrost",
   "volume_control": "PCM",

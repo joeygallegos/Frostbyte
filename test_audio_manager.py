@@ -16,6 +16,10 @@ class AudioManagerTests(unittest.TestCase):
         self.directory = Path(self.tempdir.name)
         self.server = audio_manager.ThreadingHTTPServer(("127.0.0.1", 0), audio_manager.AudioManagerHandler)
         self.server.audio_directory = self.directory
+        self.server.activity_log_path = self.directory / audio_manager.ACTIVITY_LOG_NAME
+        self.server.payload_history_path = self.directory / audio_manager.PAYLOAD_HISTORY_NAME
+        self.published_payloads = []
+        self.server.publish_payload = self.published_payloads.append
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
 
@@ -73,7 +77,7 @@ class AudioManagerTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
 
     def test_activity_endpoint_returns_newest_valid_events_first(self):
-        (self.directory / audio_manager.ACTIVITY_LOG_NAME).write_text(
+        self.server.activity_log_path.write_text(
             '{"time":"2026-01-01T00:00:00+00:00","event":"triggered","clip":"first.wav"}\n'
             'not-json\n'
             '{"time":"2026-01-01T00:01:00+00:00","event":"finished","clip":"second.mp3"}\n',
@@ -82,6 +86,42 @@ class AudioManagerTests(unittest.TestCase):
         status, payload = self.request("GET", "/api/activity")
         self.assertEqual(status, 200)
         self.assertEqual([event["clip"] for event in json.loads(payload)], ["second.mp3", "first.wav"])
+
+    def test_payload_history_endpoint_returns_newest_payload_first(self):
+        self.server.payload_history_path.write_text(
+            '[{"received_at":"2026-01-01T00:00:00+00:00","payload":"first.wav"},'
+            '{"received_at":"2026-01-01T00:01:00+00:00","payload":{"clip":"second.mp3"}}]',
+            encoding="utf-8",
+        )
+        status, payload = self.request("GET", "/api/payloads")
+        self.assertEqual(status, 200)
+        self.assertEqual([entry["payload"] for entry in json.loads(payload)], [{"clip": "second.mp3"}, "first.wav"])
+
+    def test_existing_clip_can_be_queued_as_a_payload(self):
+        (self.directory / "notice.mp3").write_bytes(b"audio")
+        request_payload = {"project": "defrost", "clip": "notice.mp3", "gain_db": 3}
+        body = json.dumps(request_payload)
+        status, _ = self.request(
+            "POST",
+            "/api/queue",
+            body,
+            {"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(json.loads(self.published_payloads[0]), request_payload)
+
+    def test_queue_rejects_missing_clip_and_nonexistent_file(self):
+        body = '{"volume":100}'
+        self.assertEqual(
+            self.request("POST", "/api/queue", body, {"Content-Type": "application/json", "Content-Length": str(len(body))})[0],
+            400,
+        )
+        body = '"missing.wav"'
+        self.assertEqual(
+            self.request("POST", "/api/queue", body, {"Content-Type": "application/json", "Content-Length": str(len(body))})[0],
+            404,
+        )
+        self.assertEqual(self.published_payloads, [])
 
     def test_unit_keeps_the_requested_current_directory_and_bind(self):
         directory = PurePosixPath("/srv/audio")

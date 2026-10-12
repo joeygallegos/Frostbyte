@@ -13,6 +13,8 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
+from payload_history import record_payload
+
 # === Load config.json ===
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
@@ -30,6 +32,7 @@ CLIENT_ID = CONFIG.get("client_id", "frostbyte-defrost-listener")
 AUDIO_DIR = Path(CONFIG.get("audio_dir", str(Path(__file__).resolve().parent)))
 ALLOWED_EXTS = set(CONFIG.get("allowed_exts", [".wav", ".mp3"]))
 ACTIVITY_LOG_PATH = Path(CONFIG.get("activity_log_path", str(Path(__file__).resolve().parent / "playback_activity.jsonl")))
+PAYLOAD_HISTORY_PATH = Path(CONFIG.get("payload_history_path", str(Path(__file__).resolve().parent / "payload_history.json")))
 ACTIVITY_LOG_LIMIT = 200
 ACTIVITY_LOG_MAX_READ_BYTES = 256 * 1024
 
@@ -145,65 +148,58 @@ def record_activity(event: str, clip: str) -> None:
 
 
 def play_clip_with_gain(path: Path, gain_db: float) -> bool:
-    """Decode a clip through FFmpeg, apply gain and limiting, then send it to ALSA."""
+    """Render gained PCM with FFmpeg, then play its complete WAV through ALSA."""
     audio_filter = f"volume={gain_db:g}dB,alimiter=limit=0.95"
-    decoder_cmd = [
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        str(path),
-        "-af",
-        audio_filter,
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
-    player_cmd = ["aplay", "-q", "-D", ALSA_DEVICE]
-
-    logging.debug("Running: %s | %s", " ".join(decoder_cmd), " ".join(player_cmd))
-
+    temporary_path: Optional[Path] = None
     try:
-        decoder = subprocess.Popen(
-            decoder_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        logging.warning(
-            "FFmpeg is not installed; playing %s without the requested gain",
-            path.name,
-        )
-        return False
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
 
-    try:
-        player = subprocess.Popen(
-            player_cmd,
-            stdin=decoder.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-    except (FileNotFoundError, OSError):
-        decoder.kill()
-        decoder.wait()
-        raise
+        # A complete seekable WAV gives aplay an unambiguous header. Explicit
+        # 48 kHz signed 16-bit PCM also keeps ALSA negotiation consistent across
+        # MP3 source rates while FFmpeg resamples without changing duration.
+        decoder_cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(path),
+            "-af",
+            audio_filter,
+            "-ar",
+            "48000",
+            "-c:a",
+            "pcm_s16le",
+            str(temporary_path),
+        ]
+        logging.debug("Running: %s", " ".join(decoder_cmd))
+        try:
+            decoder = subprocess.run(decoder_cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            logging.warning(
+                "FFmpeg is not installed; playing %s without the requested gain",
+                path.name,
+            )
+            return False
+        if decoder.returncode != 0:
+            logging.error("FFmpeg stderr: %s", decoder.stderr.strip())
+            return False
 
-    # Allow SIGPIPE to reach FFmpeg if aplay exits early.
-    if decoder.stdout:
-        decoder.stdout.close()
-
-    _, player_stderr = player.communicate()
-    decoder_stderr = decoder.stderr.read() if decoder.stderr else b""
-    decoder_returncode = decoder.wait()
-
-    if decoder_returncode != 0:
-        logging.error("FFmpeg stderr: %s", decoder_stderr.decode(errors="replace").strip())
-    if player.returncode != 0:
-        logging.error("aplay stderr: %s", player_stderr.decode(errors="replace").strip())
-
-    return True
+        player_cmd = ["aplay", "-q", "-D", ALSA_DEVICE, str(temporary_path)]
+        logging.debug("Running: %s", " ".join(player_cmd))
+        player = subprocess.run(player_cmd, capture_output=True, text=True)
+        if player.returncode != 0:
+            raise RuntimeError(f"aplay exited with status {player.returncode}: {player.stderr.strip()}")
+        return True
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logging.warning("Could not remove temporary gained audio: %s", exc)
 
 
 def play_clip(path: Path, gain_db: float = 0):
@@ -284,10 +280,26 @@ def handle_message(payload_raw: bytes):
     text = payload_raw.decode("utf-8", errors="replace").strip()
     logging.info(f"Received payload: {text}")
 
+    # Cache the message before validation so ignored triggers remain visible for
+    # diagnosis and can be corrected from the browser rather than disappearing.
+    try:
+        record_payload(PAYLOAD_HISTORY_PATH, text)
+    except OSError as exc:
+        # History is observability only; unavailable storage must not prevent an
+        # otherwise valid request from reaching the playback queue.
+        logging.warning("Could not update payload history: %s", exc)
+
     try:
         data = json.loads(text)
-        clip_name = data.get("clip")
-        meta = data
+        if isinstance(data, dict):
+            clip_name = data.get("clip")
+            meta = data
+        elif isinstance(data, str):
+            clip_name = data
+            meta = {}
+        else:
+            clip_name = None
+            meta = {}
     except json.JSONDecodeError:
         clip_name = text
         meta = {}

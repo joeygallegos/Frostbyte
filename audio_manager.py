@@ -13,13 +13,18 @@ from email.policy import default
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
+
+from payload_history import read_payload_history
 
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav"}
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_QUEUE_PAYLOAD_BYTES = 16 * 1024
 SERVICE_NAME = "frostbyte-audio-manager.service"
 ACTIVITY_LOG_NAME = "playback_activity.jsonl"
+PAYLOAD_HISTORY_NAME = "payload_history.json"
 ACTIVITY_LIMIT = 200
 MAX_ACTIVITY_LOG_READ_BYTES = 1024 * 1024
 
@@ -27,17 +32,29 @@ MAX_ACTIVITY_LOG_READ_BYTES = 1024 * 1024
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Frostbyte Audio Manager</title><style>
-body{font:16px system-ui,sans-serif;max-width:720px;margin:3rem auto;padding:0 1rem;color:#1f2937}h1{margin-bottom:.25rem}
-form{display:flex;gap:.75rem;align-items:center;margin:2rem 0}button{padding:.45rem .75rem;cursor:pointer}li{display:flex;gap:1rem;align-items:center;padding:.55rem 0;border-bottom:1px solid #ddd}li span{flex:1}#message{min-height:1.5em;color:#9b1c1c}.tabs{display:flex;gap:.5rem;margin:2rem 0 0}.tabs button[aria-selected="true"]{font-weight:700}.hidden{display:none}.event{display:block}.event time{display:block;color:#6b7280;font-size:.85em}
-</style></head><body><h1>Frostbyte Audio Manager</h1><p>Upload or remove MP3 and WAV files in this directory.</p>
-<nav class="tabs" aria-label="Audio manager sections"><button type="button" data-tab="files" aria-controls="files-panel" aria-selected="true">Files</button><button type="button" data-tab="activity" aria-controls="activity-panel" aria-selected="false">Playback activity</button></nav>
-<section id="files-panel" role="tabpanel"><form id="upload"><input name="audio" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" required><button>Upload</button></form><p id="message" role="status"></p><ul id="files"></ul></section>
-<section id="activity-panel" class="hidden" role="tabpanel"><p><button type="button" id="refresh-activity">Refresh activity</button></p><p id="activity-message" role="status"></p><ul id="activity"></ul></section><script>
-const message=document.querySelector('#message'),files=document.querySelector('#files'),activity=document.querySelector('#activity'),activityMessage=document.querySelector('#activity-message');
-async function refresh(){const r=await fetch('/api/files');const names=await r.json();files.replaceChildren(...names.map(name=>{const li=document.createElement('li'),label=document.createElement('span'),preview=document.createElement('button'),button=document.createElement('button');label.textContent=name;preview.type='button';preview.textContent='Preview';preview.onclick=()=>{const player=document.createElement('audio');player.controls=true;player.preload='none';player.src='/api/files/'+encodeURIComponent(name);li.replaceChildren(label,preview,button,player);player.play().catch(()=>{})};button.textContent='Delete';button.onclick=async()=>{if(!confirm(`Delete ${name}?`))return;const r=await fetch('/api/files/'+encodeURIComponent(name),{method:'DELETE'});message.textContent=r.ok?'Deleted.':await r.text();if(r.ok)refresh()};li.append(label,preview,button);return li}))}
+body{font:16px system-ui,sans-serif;max-width:800px;margin:3rem auto;padding:0 1rem;color:#1f2937}h1{margin-bottom:.25rem}
+form{display:flex;gap:.75rem;align-items:center;margin:2rem 0}button{padding:.45rem .75rem;cursor:pointer}li{display:flex;gap:.75rem;align-items:center;padding:.65rem 0;border-bottom:1px solid #ddd}li span{flex:1}.status{min-height:1.5em;color:#9b1c1c}.tabs{display:flex;gap:.5rem;margin:2rem 0 0}.tabs button[aria-selected="true"]{font-weight:700}.hidden{display:none}.event,.payload{display:block}.event time,.payload time{display:block;color:#6b7280;font-size:.85em}.payload pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f4f6;padding:.75rem}.payload button{margin-top:.25rem}#payload-form{display:block}textarea{box-sizing:border-box;width:100%;font:14px ui-monospace,monospace;padding:.75rem}audio{max-width:100%}
+</style></head><body><h1>Frostbyte Audio Manager</h1><p>Upload, preview, or queue MP3 and WAV clips.</p>
+<nav class="tabs" aria-label="Audio manager sections"><button type="button" data-tab="files" aria-controls="files-panel" aria-selected="true">Files</button><button type="button" data-tab="activity" aria-controls="activity-panel" aria-selected="false">Playback activity</button><button type="button" data-tab="payloads" aria-controls="payloads-panel" aria-selected="false">Payload history</button></nav>
+<section id="files-panel" role="tabpanel"><form id="upload"><input name="audio" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" required><button>Upload</button></form><p id="message" class="status" role="status"></p><ul id="files"></ul></section>
+<section id="activity-panel" class="hidden" role="tabpanel"><p><button type="button" id="refresh-activity">Refresh activity</button></p><p id="activity-message" class="status" role="status"></p><ul id="activity"></ul></section>
+<section id="payloads-panel" class="hidden" role="tabpanel"><form id="payload-form"><label for="payload">Queue a JSON payload</label><textarea id="payload" rows="9" required>{
+  "project": "defrost",
+  "clip": "file.mp3",
+  "source": "website_manual",
+  "priority": 1,
+  "volume": 100,
+  "gain_db": 3
+}</textarea><p><button>Queue payload</button> <button type="button" id="refresh-payloads">Refresh history</button></p></form><p id="payload-message" class="status" role="status"></p><ul id="payload-history"></ul></section><script>
+const message=document.querySelector('#message'),files=document.querySelector('#files'),activity=document.querySelector('#activity'),activityMessage=document.querySelector('#activity-message'),payloadMessage=document.querySelector('#payload-message'),payloadHistory=document.querySelector('#payload-history');
+function defaultPayload(clip){return {project:'defrost',clip,source:'website_manual',priority:1,volume:100,gain_db:3,timestamp:new Date().toISOString()}}
+async function queuePayload(payload,status=message){status.textContent='Queueing…';try{const r=await fetch('/api/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});status.textContent=r.ok?`Queued ${typeof payload==='string'?payload:payload.clip}.`:await r.text();return r.ok}catch(error){status.textContent='Could not reach the audio manager.';return false}}
+async function refresh(){const r=await fetch('/api/files');const names=await r.json();files.replaceChildren(...names.map(name=>{const li=document.createElement('li'),label=document.createElement('span'),preview=document.createElement('button'),queue=document.createElement('button'),remove=document.createElement('button');label.textContent=name;preview.type=queue.type=remove.type='button';preview.textContent='Preview';preview.onclick=()=>{let player=li.querySelector('audio');if(!player){player=document.createElement('audio');player.controls=true;player.preload='none';player.src='/api/files/'+encodeURIComponent(name);li.append(player)}player.play().catch(()=>{})};queue.textContent='Queue';queue.onclick=()=>queuePayload(defaultPayload(name));remove.textContent='Delete';remove.onclick=async()=>{if(!confirm(`Delete ${name}?`))return;const r=await fetch('/api/files/'+encodeURIComponent(name),{method:'DELETE'});message.textContent=r.ok?'Deleted.':await r.text();if(r.ok)refresh()};li.append(label,preview,queue,remove);return li}))}
 async function refreshActivity(){activityMessage.textContent='Loading recent activity…';try{const r=await fetch('/api/activity');if(!r.ok)throw new Error('Request failed');const events=await r.json();activityMessage.textContent=events.length?'':'No recent playback activity.';activity.replaceChildren(...events.map(event=>{const li=document.createElement('li'),text=document.createElement('span'),time=document.createElement('time'),date=new Date(event.time);li.className='event';text.textContent=`${event.event}: ${event.clip}`;time.dateTime=event.time;time.textContent=Number.isNaN(date.valueOf())?event.time:date.toLocaleString();li.append(text,time);return li}))}catch(error){activity.replaceChildren();activityMessage.textContent='Could not load playback activity. Try refreshing.'}}
-document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{const activityTab=button.dataset.tab==='activity';document.querySelector('#files-panel').classList.toggle('hidden',activityTab);document.querySelector('#activity-panel').classList.toggle('hidden',!activityTab);document.querySelectorAll('[data-tab]').forEach(tab=>tab.setAttribute('aria-selected',tab===button));if(activityTab)refreshActivity()});document.querySelector('#refresh-activity').onclick=refreshActivity;
-document.querySelector('#upload').onsubmit=async event=>{event.preventDefault();const r=await fetch('/api/files',{method:'POST',body:new FormData(event.currentTarget)});message.textContent=r.ok?'Uploaded.':await r.text();if(r.ok){event.currentTarget.reset();refresh()}};refresh();
+async function refreshPayloads(){payloadMessage.textContent='Loading payload history…';try{const r=await fetch('/api/payloads');if(!r.ok)throw new Error('Request failed');const entries=await r.json();payloadMessage.textContent=entries.length?'':'No payloads have been received yet.';payloadHistory.replaceChildren(...entries.map(entry=>{const li=document.createElement('li'),time=document.createElement('time'),pre=document.createElement('pre'),button=document.createElement('button'),date=new Date(entry.received_at);li.className='payload';time.dateTime=entry.received_at;time.textContent=Number.isNaN(date.valueOf())?entry.received_at:date.toLocaleString();pre.textContent=typeof entry.payload==='string'?entry.payload:JSON.stringify(entry.payload,null,2);button.type='button';button.textContent='Queue again';button.disabled=entry.truncated===true;button.onclick=()=>queuePayload(entry.payload,payloadMessage);li.append(time,pre,button);return li}))}catch(error){payloadHistory.replaceChildren();payloadMessage.textContent='Could not load payload history. Try refreshing.'}}
+document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{const selected=button.dataset.tab;document.querySelectorAll('[role="tabpanel"]').forEach(panel=>panel.classList.toggle('hidden',panel.id!==selected+'-panel'));document.querySelectorAll('[data-tab]').forEach(tab=>tab.setAttribute('aria-selected',tab===button));if(selected==='activity')refreshActivity();if(selected==='payloads')refreshPayloads()});document.querySelector('#refresh-activity').onclick=refreshActivity;document.querySelector('#refresh-payloads').onclick=refreshPayloads;
+document.querySelector('#payload-form').onsubmit=async event=>{event.preventDefault();try{const payload=JSON.parse(document.querySelector('#payload').value);if(await queuePayload(payload,payloadMessage))setTimeout(refreshPayloads,500)}catch(error){payloadMessage.textContent='Enter a valid JSON payload.'}};
+document.querySelector('#upload').onsubmit=async event=>{event.preventDefault();const r=await fetch('/api/files',{method:'POST',body:new FormData(event.currentTarget)});message.textContent=r.ok?'Uploaded.':await r.text();if(r.ok){event.currentTarget.reset();refresh()}};document.querySelector('#payload').value=JSON.stringify(defaultPayload('file.mp3'),null,2);refresh();
 </script></body></html>"""
 
 
@@ -57,9 +74,50 @@ def audio_files(directory: Path) -> list[str]:
     )
 
 
-def activity_events(directory: Path) -> list[dict[str, str]]:
+def load_config() -> dict[str, Any]:
+    """Load the listener's broker and shared-file settings when available."""
+    path = Path(__file__).resolve().parent / "config.json"
+    try:
+        with path.open(encoding="utf-8") as config_file:
+            value = json.load(config_file)
+            return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def mqtt_publisher(host: str, port: int, topic: str) -> Callable[[str], None]:
+    """Build the narrow publisher used by the queue endpoint."""
+    def publish(payload_text: str) -> None:
+        # Paho is already Frostbyte's MQTT dependency. Importing it here keeps
+        # non-server helpers and unit tests usable without connecting to a broker.
+        import paho.mqtt.publish as mqtt_publish
+
+        mqtt_publish.single(topic, payload=payload_text, hostname=host, port=port)
+
+    return publish
+
+
+def queued_payload_text(payload: Any, directory: Path) -> str:
+    """Validate a playback request and serialize it for the listener's topic."""
+    if isinstance(payload, dict):
+        clip = payload.get("clip")
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    elif isinstance(payload, str):
+        clip = payload
+        serialized = payload
+    else:
+        raise ValueError("Payload must be a JSON object or a filename string.")
+
+    if not valid_audio_name(clip):
+        raise ValueError("Payload clip must be a plain .mp3 or .wav filename.")
+    target = directory / clip
+    if target.is_symlink() or not target.is_file():
+        raise FileNotFoundError(clip)
+    return serialized
+
+
+def activity_events(path: Path) -> list[dict[str, str]]:
     """Read recent listener events without exposing a symlinked or oversized log."""
-    path = directory / ACTIVITY_LOG_NAME
     try:
         if path.is_symlink() or not path.is_file():
             return []
@@ -89,6 +147,14 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
     def audio_directory(self) -> Path:
         return self.server.audio_directory  # type: ignore[attr-defined]
 
+    @property
+    def payload_history_path(self) -> Path:
+        return self.server.payload_history_path  # type: ignore[attr-defined]
+
+    @property
+    def activity_log_path(self) -> Path:
+        return self.server.activity_log_path  # type: ignore[attr-defined]
+
     def send_text(self, status: HTTPStatus, text: str, content_type: str = "text/plain; charset=utf-8") -> None:
         encoded = text.encode("utf-8")
         self.send_response(status)
@@ -104,7 +170,12 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
         elif path == "/api/files":
             self.send_text(HTTPStatus.OK, json.dumps(audio_files(self.audio_directory)), "application/json")
         elif path == "/api/activity":
-            self.send_text(HTTPStatus.OK, json.dumps(activity_events(self.audio_directory)), "application/json")
+            self.send_text(HTTPStatus.OK, json.dumps(activity_events(self.activity_log_path)), "application/json")
+        elif path == "/api/payloads":
+            # Newest-first ordering makes a freshly received or replayed payload
+            # visible without requiring users to scan to the bottom of the page.
+            entries = list(reversed(read_payload_history(self.payload_history_path)))
+            self.send_text(HTTPStatus.OK, json.dumps(entries), "application/json")
         elif path.startswith("/api/files/"):
             self.serve_audio(unquote(path[len("/api/files/"):]))
         else:
@@ -131,7 +202,11 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/files":
+        path = urlparse(self.path).path
+        if path == "/api/queue":
+            self.queue_payload()
+            return
+        if path != "/api/files":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
 
@@ -174,6 +249,41 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
             self.send_text(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not save the upload.")
             return
         self.send_text(HTTPStatus.CREATED, "Uploaded.")
+
+    def queue_payload(self) -> None:
+        """Validate and publish one audio request to the configured listener."""
+        if self.headers.get_content_type() != "application/json":
+            self.send_text(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Use application/json for a payload.")
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self.send_text(HTTPStatus.BAD_REQUEST, "A valid Content-Length header is required.")
+            return
+        if content_length < 1 or content_length > MAX_QUEUE_PAYLOAD_BYTES:
+            self.send_text(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Payload must be between 1 byte and 16 KiB.")
+            return
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+            payload_text = queued_payload_text(payload, self.audio_directory)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_text(HTTPStatus.BAD_REQUEST, "Enter a valid JSON payload.")
+            return
+        except ValueError as error:
+            self.send_text(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        except FileNotFoundError:
+            self.send_text(HTTPStatus.NOT_FOUND, "The requested audio clip does not exist.")
+            return
+
+        try:
+            self.server.publish_payload(payload_text)  # type: ignore[attr-defined]
+        except Exception:
+            # Broker errors are intentionally generic: connection details and
+            # credentials should not be disclosed to unauthenticated web clients.
+            self.send_text(HTTPStatus.BAD_GATEWAY, "Could not queue the payload with the MQTT broker.")
+            return
+        self.send_text(HTTPStatus.ACCEPTED, "Queued.")
 
     def do_DELETE(self) -> None:
         prefix = "/api/files/"
@@ -279,10 +389,23 @@ def install_service(args: argparse.Namespace) -> None:
 
 
 def run_server(args: argparse.Namespace) -> None:
+    config = load_config()
     server = ThreadingHTTPServer((args.host, args.port), AudioManagerHandler)
-    # Capturing this once makes all web writes and deletes stay in the directory
-    # from which the process was started, even if another thread changes cwd.
-    server.audio_directory = Path.cwd().resolve()  # type: ignore[attr-defined]
+    # The manager and listener must resolve clips against the same directory or
+    # a web request can be accepted locally and then rejected by the listener.
+    server.audio_directory = Path(config.get("audio_dir", Path.cwd())).expanduser().resolve()  # type: ignore[attr-defined]
+    if not server.audio_directory.is_dir():  # type: ignore[attr-defined]
+        server.server_close()
+        raise RuntimeError(f"Audio directory does not exist: {server.audio_directory}")  # type: ignore[attr-defined]
+    activity_setting = config.get("activity_log_path", str(Path(__file__).resolve().parent / ACTIVITY_LOG_NAME))
+    server.activity_log_path = Path(activity_setting)  # type: ignore[attr-defined]
+    history_setting = config.get("payload_history_path", str(Path(__file__).resolve().parent / PAYLOAD_HISTORY_NAME))
+    server.payload_history_path = Path(history_setting)  # type: ignore[attr-defined]
+    server.publish_payload = mqtt_publisher(  # type: ignore[attr-defined]
+        str(config.get("mqtt_host", "localhost")),
+        int(config.get("mqtt_port", 1883)),
+        str(config.get("mqtt_topic", "home/ambient-audio")),
+    )
     print(f"Serving {server.audio_directory} at http://{args.host}:{args.port}/")
     try:
         server.serve_forever()
