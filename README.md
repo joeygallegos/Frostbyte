@@ -93,21 +93,21 @@ use it. It intentionally has no login, so anyone who can reach the chosen port
 can upload, delete, or trigger audio files:
 
 ```bash
-python3 audio_manager.py
+.venv/bin/python audio_manager.py
 ```
 
 Open `http://<server-LAN-IP>:8000/` from another device. To restrict access to
 the server machine only, choose an explicit loopback address:
 
 ```bash
-python3 audio_manager.py --host 127.0.0.1
+.venv/bin/python audio_manager.py --host 127.0.0.1
 ```
 
 On a Linux system with systemd, install it as an always-on service from the
 Frostbyte project directory (the directory containing `defrost_listener.py`):
 
 ```bash
-python3 audio_manager.py --install
+.venv/bin/python audio_manager.py --install
 ```
 
 The installer prompts for `sudo` only to place, enable, and start
@@ -141,6 +141,20 @@ JSON object in the Payload history tab. **Queue again** republishes a saved
 payload. The manager uses `mqtt_host`, `mqtt_port`, and `mqtt_topic` from
 `config.json`; a successful response means the broker accepted the publish, and
 the listener records the message when it receives it.
+
+Manual queueing requires Paho in the manager's Python environment, just as the
+listener does. If uploads and previews work but queueing fails, rerun the install
+command above with `.venv/bin/python`, then restart the service:
+
+```bash
+sudo systemctl restart frostbyte-audio-manager.service
+sudo journalctl -u frostbyte-audio-manager.service -n 50 --no-pager
+```
+
+Reinstalling updates the service's Python path; restarting alone keeps the old
+path. Broker failures record the exception type in the service journal without
+logging payloads or connection credentials. If the environment is correct, check
+that the manager's `config.json` points to the reachable broker and listener topic.
 
 Because the site has no login, restrict port 8000 at the network boundary or
 bind it to loopback if other network users must not view payload metadata or

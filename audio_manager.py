@@ -29,6 +29,10 @@ ACTIVITY_LIMIT = 200
 MAX_ACTIVITY_LOG_READ_BYTES = 1024 * 1024
 
 
+class MissingMQTTDependencyError(RuntimeError):
+    """The manager's Python environment cannot load its MQTT publisher."""
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Frostbyte Audio Manager</title><style>
@@ -90,7 +94,10 @@ def mqtt_publisher(host: str, port: int, topic: str) -> Callable[[str], None]:
     def publish(payload_text: str) -> None:
         # Paho is already Frostbyte's MQTT dependency. Importing it here keeps
         # non-server helpers and unit tests usable without connecting to a broker.
-        import paho.mqtt.publish as mqtt_publish
+        try:
+            import paho.mqtt.publish as mqtt_publish
+        except ImportError as error:
+            raise MissingMQTTDependencyError from error
 
         mqtt_publish.single(topic, payload=payload_text, hostname=host, port=port)
 
@@ -278,9 +285,17 @@ class AudioManagerHandler(BaseHTTPRequestHandler):
 
         try:
             self.server.publish_payload(payload_text)  # type: ignore[attr-defined]
-        except Exception:
+        except MissingMQTTDependencyError:
+            self.send_text(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "MQTT publishing is unavailable: run the audio manager with the Python "
+                "environment containing paho-mqtt, then reinstall its service with that Python.",
+            )
+            return
+        except Exception as error:
             # Broker errors are intentionally generic: connection details and
             # credentials should not be disclosed to unauthenticated web clients.
+            self.log_message("MQTT publish failed (%s).", type(error).__name__)
             self.send_text(HTTPStatus.BAD_GATEWAY, "Could not queue the payload with the MQTT broker.")
             return
         self.send_text(HTTPStatus.ACCEPTED, "Queued.")
@@ -370,7 +385,9 @@ def install_service(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Linux user does not exist: {user}") from error
     script = Path(__file__).resolve()
     working_directory = Path.cwd().resolve()
-    unit = service_unit(script, working_directory, user, str(Path(sys.executable).resolve()), args.host, args.port)
+    # A venv's Python can be a symlink to system Python on Linux. Resolving it
+    # loses the venv and its Paho dependency when systemd starts the manager.
+    unit = service_unit(script, working_directory, user, str(Path(sys.executable).absolute()), args.host, args.port)
 
     # Write the unit through sudo rather than creating a local temporary file.
     # Normal web-server operation therefore never writes anything but audio

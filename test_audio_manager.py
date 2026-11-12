@@ -5,7 +5,8 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path, PurePosixPath
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import audio_manager
 
@@ -122,6 +123,56 @@ class AudioManagerTests(unittest.TestCase):
             404,
         )
         self.assertEqual(self.published_payloads, [])
+
+    def test_missing_paho_reports_environment_fix(self):
+        (self.directory / "notice.mp3").write_bytes(b"audio")
+        self.server.publish_payload = audio_manager.mqtt_publisher("localhost", 1883, "audio")
+        # Model the system interpreter used by an incorrectly installed service.
+        with patch.dict("sys.modules", {"paho.mqtt.publish": None}):
+            status, payload = self.request(
+                "POST", "/api/queue", '"notice.mp3"', {"Content-Type": "application/json"},
+            )
+        self.assertEqual(status, 503)
+        self.assertIn("paho-mqtt", payload)
+        self.assertIn("reinstall its service", payload)
+
+    def test_broker_failure_does_not_expose_connection_details(self):
+        (self.directory / "notice.mp3").write_bytes(b"audio")
+        self.server.publish_payload = Mock(side_effect=ConnectionRefusedError("private connection details"))
+        with patch.object(audio_manager.AudioManagerHandler, "log_message") as log:
+            status, payload = self.request(
+                "POST", "/api/queue", '"notice.mp3"', {"Content-Type": "application/json"},
+            )
+        self.assertEqual(status, 502)
+        self.assertNotIn("private connection details", payload)
+        log.assert_any_call("MQTT publish failed (%s).", "ConnectionRefusedError")
+
+    def test_mqtt_publisher_forwards_payload_and_broker_settings(self):
+        with patch("paho.mqtt.publish.single") as publish:
+            audio_manager.mqtt_publisher("broker", 1884, "audio/queue")('{"clip":"notice.mp3"}')
+        publish.assert_called_once_with(
+            "audio/queue", payload='{"clip":"notice.mp3"}', hostname="broker", port=1884,
+        )
+
+    def test_service_install_preserves_virtual_environment_python_path(self):
+        python = self.directory / ".venv" / "bin" / "python"
+        original_resolve = Path.resolve
+
+        def resolve(path):
+            # Simulate Linux resolving a venv symlink to the system interpreter.
+            return Path("/usr/bin/python3") if path == python else original_resolve(path)
+
+        with patch.object(audio_manager.platform, "system", return_value="Linux"), patch.dict(
+            os.environ, {"SUDO_USER": "player"},
+        ), patch.dict("sys.modules", {"pwd": SimpleNamespace(getpwnam=Mock())}), patch.object(
+            audio_manager.sys, "executable", str(python),
+        ), patch.object(Path, "resolve", autospec=True, side_effect=resolve), patch.object(
+            audio_manager, "systemd_path", return_value="/srv/audio",
+        ), patch.object(audio_manager.subprocess, "run") as run:
+            audio_manager.install_service(SimpleNamespace(host="127.0.0.1", port=8000))
+
+        unit = run.call_args_list[0].kwargs["input"]
+        self.assertIn(f"ExecStart={audio_manager.systemd_quote(str(python.absolute()))} ", unit)
 
     def test_unit_keeps_the_requested_current_directory_and_bind(self):
         directory = PurePosixPath("/srv/audio")
