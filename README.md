@@ -103,6 +103,22 @@ the server machine only, choose an explicit loopback address:
 .venv/bin/python audio_manager.py --host 127.0.0.1
 ```
 
+The page shows the **Configured listening topic** from `mqtt_topic` above the
+tabs (default: `home/ambient-audio`), including any MQTT wildcards. This is the
+configured subscription, not live connection status. Restart both the manager
+and listener after changing the topic in `config.json`.
+
+The **Soundboard** tab provides a Launchpad-style grid of colored pads, one per
+audio file. Open `http://<server-LAN-IP>:8000/#soundboard` to go straight to it.
+Use **Play on** to choose **This device** (the default, through your laptop,
+iPad, or other browser) or **MQTT speaker**. Tap or click a pad, or focus it with
+Tab and press Enter or Space. Local playback has browser audio controls and a
+new clip replaces the current one; it does not publish to MQTT. The MQTT option
+uses the same payload settings as **Queue**, with clips playing sequentially.
+**Queued** means broker acceptance, not playback completion. Changing output
+stops local playback but does not cancel requests already queued on the MQTT
+speaker. Use **Refresh sounds** after adding or removing files.
+
 On a Linux system with systemd, install it as an always-on service from the
 Frostbyte project directory (the directory containing `defrost_listener.py`):
 
@@ -209,6 +225,10 @@ setting overrides `default_gain_db`. If FFmpeg is unavailable, Frostbyte logs a
 warning and plays the clip without gain.
 
 ## Troubleshooting
+
+Run automated checks with `python -m unittest discover`. Soundboard script tests
+also use Node.js when available and are skipped if it is not installed; Node.js
+is not required to run the application.
 
 List ALSA devices and test the configured alias:
 

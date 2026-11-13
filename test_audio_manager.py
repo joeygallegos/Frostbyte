@@ -19,6 +19,7 @@ class AudioManagerTests(unittest.TestCase):
         self.server.audio_directory = self.directory
         self.server.activity_log_path = self.directory / audio_manager.ACTIVITY_LOG_NAME
         self.server.payload_history_path = self.directory / audio_manager.PAYLOAD_HISTORY_NAME
+        self.server.mqtt_topic = "home/ambient-audio"
         self.published_payloads = []
         self.server.publish_payload = self.published_payloads.append
         self.thread = threading.Thread(target=self.server.serve_forever)
@@ -43,6 +44,26 @@ class AudioManagerTests(unittest.TestCase):
         body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"{name}\"\r\n"
                 "Content-Type: application/octet-stream\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
         return self.request("POST", "/api/files", body, {"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))})
+
+    def test_page_displays_configured_listening_topic(self):
+        for topic in ("home/ambient-audio", "speakers/+/requests/#", 'audio/<script>&"'):
+            with self.subTest(topic=topic):
+                self.server.mqtt_topic = topic
+                status, page = self.request("GET", "/")
+                self.assertEqual(status, 200)
+                self.assertIn("Configured listening topic:", page)
+                self.assertIn(audio_manager.escape(topic) + "</code>", page)
+                self.assertNotIn("__MQTT_TOPIC__", page)
+                self.assertNotIn("audio/<script>", page)
+
+    def test_server_uses_same_topic_for_display_and_publishing(self):
+        for config, topic in (({}, "home/ambient-audio"), ({"mqtt_topic": "speakers/requests"}, "speakers/requests")):
+            with self.subTest(config=config), patch.object(audio_manager, "load_config", return_value=config), patch.object(
+                audio_manager, "ThreadingHTTPServer",
+            ) as server_class, patch.object(audio_manager, "mqtt_publisher") as publisher:
+                audio_manager.run_server(SimpleNamespace(host="127.0.0.1", port=8000))
+                self.assertEqual(server_class.return_value.mqtt_topic, topic)
+                publisher.assert_called_once_with("localhost", 1883, topic)
 
     def test_only_allowed_files_can_be_uploaded_listed_and_deleted(self):
         self.assertEqual(self.upload("notice.mp3")[0], 201)
